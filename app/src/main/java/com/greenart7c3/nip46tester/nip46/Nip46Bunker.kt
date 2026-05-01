@@ -143,12 +143,50 @@ class Nip46Bunker(
                 if (peer == null || msg == null) Nip46Response(id = req.id, error = "missing params")
                 else Nip46Response(id = req.id, result = crypto.nip44Decrypt(msg, peer))
             }
+            "nip04_encrypt" -> {
+                val (peer, msg) = req.params.let { it.getOrNull(0) to it.getOrNull(1) }
+                if (peer == null || msg == null) Nip46Response(id = req.id, error = "missing params")
+                else Nip46Response(id = req.id, result = crypto.nip04Encrypt(msg, peer))
+            }
+            "nip04_decrypt" -> {
+                val (peer, msg) = req.params.let { it.getOrNull(0) to it.getOrNull(1) }
+                if (peer == null || msg == null) Nip46Response(id = req.id, error = "missing params")
+                else Nip46Response(id = req.id, result = crypto.nip04Decrypt(msg, peer))
+            }
+            "switch_relays" -> {
+                if (req.params.isEmpty()) {
+                    Nip46Response(id = req.id, error = "missing relays")
+                } else {
+                    switchRelays(req.params)
+                    Nip46Response(id = req.id, result = "ack")
+                }
+            }
             "sign_event" -> {
                 val unsigned = req.params.getOrNull(0)
                 if (unsigned == null) Nip46Response(id = req.id, error = "missing event")
                 else Nip46Response(id = req.id, result = unsigned) // tester echo; real impl would sign
             }
             else -> Nip46Response(id = req.id, error = "method not supported: ${req.method}")
+        }
+    }
+
+    /** Replaces the bunker's relay set, per NIP-46 switch_relays. */
+    private fun switchRelays(newRelayUrls: List<String>) {
+        val targetSet = newRelayUrls.toSet()
+        val toClose = relays.filter { it.url !in targetSet }
+        toClose.forEach {
+            it.unsubscribe(subscriptionId)
+            it.close()
+            relays.remove(it)
+            onLog("[bunker] switch_relays: dropped ${it.url}")
+        }
+        newRelayUrls.forEach { url ->
+            if (relays.none { it.url == url }) {
+                val r = RelayConnection(url)
+                relays += r
+                wireUpRelay(r)
+                onLog("[bunker] switch_relays: added $url")
+            }
         }
     }
 

@@ -164,6 +164,12 @@ class Nip46Client(
     suspend fun nip04Decrypt(thirdPartyPubKey: String, ciphertext: String): Nip46Response? =
         request("nip04_decrypt", listOf(thirdPartyPubKey, ciphertext))
 
+    /**
+     * Asks the bunker to switch its relays. Per NIP-46 the params are the new relay URLs.
+     */
+    suspend fun switchRelays(newRelays: List<String>): Nip46Response? =
+        request("switch_relays", newRelays)
+
     fun close() {
         relays.forEach {
             it.unsubscribe(subscriptionId)

@@ -49,6 +49,10 @@ fun ClientScreen() {
     var ncPerms by remember { mutableStateOf("") }
     var ncUrl by remember { mutableStateOf("") }
 
+    var switchRelaysCsv by remember { mutableStateOf("") }
+    var customMethod by remember { mutableStateOf("") }
+    var customParams by remember { mutableStateOf("") }
+
     val log = remember { mutableStateListOf<String>() }
     var client by remember { mutableStateOf<Nip46Client?>(null) }
 
@@ -244,6 +248,20 @@ fun ClientScreen() {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("nip44_decrypt") }
+        OutlinedButton(
+            onClick = {
+                val pk = thirdPartyPub.trim().ifBlank { return@OutlinedButton }
+                scope.launch { client?.nip04Encrypt(pk, encMsg)?.also { appendLog("[client] nip04_encrypt: $it") } }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("nip04_encrypt") }
+        OutlinedButton(
+            onClick = {
+                val pk = thirdPartyPub.trim().ifBlank { return@OutlinedButton }
+                scope.launch { client?.nip04Decrypt(pk, encMsg)?.also { appendLog("[client] nip04_decrypt: $it") } }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("nip04_decrypt") }
 
         OutlinedButton(
             onClick = {
@@ -255,6 +273,60 @@ fun ClientScreen() {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("sign_event (kind 1 hello)") }
+
+        HorizontalDivider()
+        Text("switch_relays", style = MaterialTheme.typography.titleSmall)
+        OutlinedTextField(
+            value = switchRelaysCsv,
+            onValueChange = { switchRelaysCsv = it },
+            label = { Text("New relays (comma-separated wss://…)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedButton(
+            onClick = {
+                val urls = switchRelaysCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                if (urls.isEmpty()) {
+                    appendLog("[client] switch_relays needs at least one URL")
+                    return@OutlinedButton
+                }
+                scope.launch { client?.switchRelays(urls)?.also { appendLog("[client] switch_relays: $it") } }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("switch_relays") }
+
+        HorizontalDivider()
+        Text("Custom method", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "Send any NIP-46 method. Each line in the params box is one positional param " +
+                "(strings are sent as-is; the protocol always uses string params).",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedTextField(
+            value = customMethod,
+            onValueChange = { customMethod = it },
+            label = { Text("method name") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = customParams,
+            onValueChange = { customParams = it },
+            label = { Text("params (one per line)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedButton(
+            onClick = {
+                val method = customMethod.trim().ifBlank {
+                    appendLog("[client] custom: method name required")
+                    return@OutlinedButton
+                }
+                val params = customParams.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+                scope.launch {
+                    client?.request(method, params)?.also { appendLog("[client] $method: $it") }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Send custom method") }
 
         OutlinedButton(
             onClick = { client?.close().also { appendLog("[client] closed") } },

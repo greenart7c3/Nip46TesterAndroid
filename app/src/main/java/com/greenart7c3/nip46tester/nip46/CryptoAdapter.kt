@@ -30,6 +30,12 @@ class CryptoAdapter(privateKeyHex: String? = null) {
     suspend fun nip44Decrypt(ciphertext: String, peerPubKeyHex: String): String =
         signer.nip44Decrypt(ciphertext, peerPubKeyHex)
 
+    suspend fun nip04Encrypt(plaintext: String, peerPubKeyHex: String): String =
+        signer.nip04Encrypt(plaintext, peerPubKeyHex)
+
+    suspend fun nip04Decrypt(ciphertext: String, peerPubKeyHex: String): String =
+        signer.nip04Decrypt(ciphertext, peerPubKeyHex)
+
     /** Signs a kind-24133 event whose content is already an encrypted payload. */
     suspend fun signNip46Event(content: String, recipientPubKeyHex: String): NostrEvent {
         val tags: Array<Array<String>> = arrayOf(arrayOf("p", recipientPubKeyHex))
