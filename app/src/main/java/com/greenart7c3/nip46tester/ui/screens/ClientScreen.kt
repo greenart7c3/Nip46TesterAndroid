@@ -43,7 +43,7 @@ fun ClientScreen() {
     var thirdPartyPub by remember { mutableStateOf("") }
     var encMsg by remember { mutableStateOf("hello from nip-46 tester") }
 
-    var ncRelaysCsv by remember { mutableStateOf("wss://relay.nsec.app") }
+    var ncRelaysCsv by remember { mutableStateOf("wss://nos.lol") }
     var ncSecret by remember { mutableStateOf(randomSecret()) }
     var ncName by remember { mutableStateOf("NIP-46 Tester") }
     var ncPerms by remember { mutableStateOf("") }

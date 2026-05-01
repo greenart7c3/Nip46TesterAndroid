@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun BunkerScreen() {
     val scope = rememberCoroutineScope()
-    var relaysCsv by remember { mutableStateOf("wss://relay.nsec.app") }
+    var relaysCsv by remember { mutableStateOf("wss://nos.lol") }
     var bunkerPriv by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("test-secret") }
     var bunker by remember { mutableStateOf<Nip46Bunker?>(null) }

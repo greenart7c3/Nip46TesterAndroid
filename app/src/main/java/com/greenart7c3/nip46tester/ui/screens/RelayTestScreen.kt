@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun RelayTestScreen() {
     val scope = rememberCoroutineScope()
-    var relayUrl by remember { mutableStateOf("wss://relay.damus.io") }
+    var relayUrl by remember { mutableStateOf("wss://nos.lol") }
     var running by remember { mutableStateOf(false) }
     var verdict by remember { mutableStateOf("") }
     val log = remember { mutableStateListOf<String>() }
