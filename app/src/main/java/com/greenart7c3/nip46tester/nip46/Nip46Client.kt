@@ -6,6 +6,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -21,7 +23,7 @@ import kotlinx.serialization.json.buildJsonObject
  *    discovered from the first decryptable inbound message.
  */
 class Nip46Client(
-    val relayUrls: List<String>,
+    val initialRelayUrls: List<String>,
     initialRemotePubKey: String? = null,
     val initialSecret: String? = null,
     privateKeyHex: String? = null,
@@ -32,7 +34,7 @@ class Nip46Client(
         privateKeyHex: String? = null,
         onLog: (String) -> Unit = {},
     ) : this(
-        relayUrls = bunker.relays,
+        initialRelayUrls = bunker.relays,
         initialRemotePubKey = bunker.remotePubKey,
         initialSecret = bunker.secret,
         privateKeyHex = privateKeyHex,
@@ -41,7 +43,7 @@ class Nip46Client(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val crypto = CryptoAdapter(privateKeyHex)
-    private val relays = relayUrls.map { RelayConnection(it) }
+    private val relays: MutableList<RelayConnection> = initialRelayUrls.map { RelayConnection(it) }.toMutableList()
     private val pending = mutableMapOf<String, CompletableDeferred<Nip46Response>>()
     private val subscriptionId = "nip46-client-${System.currentTimeMillis()}"
 
@@ -50,12 +52,13 @@ class Nip46Client(
     val clientPubKey: String get() = crypto.pubKeyHex
     val bunkerPubKey: String? get() = remotePubKey
     val isClientInitiated: Boolean = initialRemotePubKey == null
+    val currentRelayUrls: List<String> get() = relays.map { it.url }
 
     /** Builds a nostrconnect:// URL pointing at this client. Use only in client-initiated mode. */
     fun nostrConnectUrl(secret: String, name: String? = null, perms: String? = null): String =
         NostrConnectUrl.build(
             clientPubKey = crypto.pubKeyHex,
-            relays = relayUrls,
+            relays = relays.map { it.url },
             secret = secret,
             name = name,
             perms = perms,
@@ -66,33 +69,35 @@ class Nip46Client(
             onLog("[client] No relays configured")
             return
         }
-        relays.forEach { relay ->
-            relay.connect()
-            scope.launch {
-                relay.status.collect { onLog("[relay ${relay.shortName()}] $it") }
-            }
-            scope.launch {
-                relay.messages.collect { msg ->
-                    when (msg) {
-                        is RelayMessage.Event -> handleIncoming(msg.event)
-                        is RelayMessage.Ok -> onLog("[relay ${relay.shortName()}] OK ${msg.eventId.take(8)} accepted=${msg.accepted} ${msg.message}")
-                        is RelayMessage.Notice -> onLog("[relay ${relay.shortName()}] NOTICE ${msg.text}")
-                        is RelayMessage.Closed -> onLog("[relay ${relay.shortName()}] CLOSED ${msg.message}")
-                        else -> {}
-                    }
+        relays.toList().forEach { wireUpRelay(it) }
+    }
+
+    private fun wireUpRelay(relay: RelayConnection) {
+        relay.connect()
+        scope.launch {
+            relay.status.collect { onLog("[relay ${relay.shortName()}] $it") }
+        }
+        scope.launch {
+            relay.messages.collect { msg ->
+                when (msg) {
+                    is RelayMessage.Event -> handleIncoming(msg.event)
+                    is RelayMessage.Ok -> onLog("[relay ${relay.shortName()}] OK ${msg.eventId.take(8)} accepted=${msg.accepted} ${msg.message}")
+                    is RelayMessage.Notice -> onLog("[relay ${relay.shortName()}] NOTICE ${msg.text}")
+                    is RelayMessage.Closed -> onLog("[relay ${relay.shortName()}] CLOSED ${msg.message}")
+                    else -> {}
                 }
             }
-            val filter: JsonObject = buildJsonObject {
-                put("kinds", JsonArray(listOf(JsonPrimitive(NIP46_KIND))))
-                // In nostrconnect mode the bunker's pubkey is unknown until first contact;
-                // skip the authors filter and discover it from incoming events.
-                remotePubKey?.let { put("authors", JsonArray(listOf(JsonPrimitive(it)))) }
-                put("#p", JsonArray(listOf(JsonPrimitive(crypto.pubKeyHex))))
-                put("limit", JsonPrimitive(0))
-            }
-            relay.subscribe(subscriptionId, filter)
-            onLog("[relay ${relay.shortName()}] subscribed as $subscriptionId")
         }
+        val filter: JsonObject = buildJsonObject {
+            put("kinds", JsonArray(listOf(JsonPrimitive(NIP46_KIND))))
+            // In nostrconnect mode the bunker's pubkey is unknown until first contact;
+            // skip the authors filter and discover it from incoming events.
+            remotePubKey?.let { put("authors", JsonArray(listOf(JsonPrimitive(it)))) }
+            put("#p", JsonArray(listOf(JsonPrimitive(crypto.pubKeyHex))))
+            put("limit", JsonPrimitive(0))
+        }
+        relay.subscribe(subscriptionId, filter)
+        onLog("[relay ${relay.shortName()}] subscribed as $subscriptionId")
     }
 
     private suspend fun handleIncoming(event: NostrEvent) {
@@ -165,10 +170,50 @@ class Nip46Client(
         request("nip04_decrypt", listOf(thirdPartyPubKey, ciphertext))
 
     /**
-     * Asks the bunker to switch its relays. Per NIP-46 the params are the new relay URLs.
+     * Per NIP-46, switch_relays is a request with empty params. The bunker replies with a
+     * JSON-stringified array of relay URLs the client should switch to, or null if the client
+     * should keep using the same relays. On a non-null result the client updates its own
+     * subscriptions accordingly.
      */
-    suspend fun switchRelays(newRelays: List<String>): Nip46Response? =
-        request("switch_relays", newRelays)
+    suspend fun switchRelays(): Nip46Response? {
+        val resp = request("switch_relays", emptyList()) ?: return null
+        val newList = parseRelaysResult(resp.result)
+        if (newList == null) {
+            onLog("[client] switch_relays: bunker returned null — keeping current relays")
+        } else {
+            applyNewRelaySet(newList)
+        }
+        return resp
+    }
+
+    private fun parseRelaysResult(result: String?): List<String>? {
+        if (result.isNullOrBlank() || result == "null") return null
+        return try {
+            NostrJson.decodeFromString(ListSerializer(String.serializer()), result)
+        } catch (t: Throwable) {
+            onLog("[client] switch_relays: could not parse result as JSON array: ${t.message}")
+            null
+        }
+    }
+
+    private fun applyNewRelaySet(newRelayUrls: List<String>) {
+        val target = newRelayUrls.toSet()
+        val toClose = relays.filter { it.url !in target }
+        toClose.forEach {
+            it.unsubscribe(subscriptionId)
+            it.close()
+            relays.remove(it)
+            onLog("[client] switch_relays: dropped ${it.url}")
+        }
+        newRelayUrls.forEach { url ->
+            if (relays.none { it.url == url }) {
+                val r = RelayConnection(url)
+                relays += r
+                wireUpRelay(r)
+                onLog("[client] switch_relays: added $url")
+            }
+        }
+    }
 
     fun close() {
         relays.forEach {

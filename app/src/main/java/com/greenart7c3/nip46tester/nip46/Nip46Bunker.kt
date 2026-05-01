@@ -4,6 +4,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -154,12 +156,12 @@ class Nip46Bunker(
                 else Nip46Response(id = req.id, result = crypto.nip04Decrypt(msg, peer))
             }
             "switch_relays" -> {
-                if (req.params.isEmpty()) {
-                    Nip46Response(id = req.id, error = "missing relays")
-                } else {
-                    switchRelays(req.params)
-                    Nip46Response(id = req.id, result = "ack")
-                }
+                // Per NIP-46: client sends [], bunker replies with its current relay list
+                // (JSON-stringified array) or null if the client should keep using its current
+                // relays. We always advertise the current set so the tester can observe it.
+                val urls = relays.map { it.url }
+                val json = NostrJson.encodeToString(ListSerializer(String.serializer()), urls)
+                Nip46Response(id = req.id, result = json)
             }
             "sign_event" -> {
                 val unsigned = req.params.getOrNull(0)
@@ -167,26 +169,6 @@ class Nip46Bunker(
                 else Nip46Response(id = req.id, result = unsigned) // tester echo; real impl would sign
             }
             else -> Nip46Response(id = req.id, error = "method not supported: ${req.method}")
-        }
-    }
-
-    /** Replaces the bunker's relay set, per NIP-46 switch_relays. */
-    private fun switchRelays(newRelayUrls: List<String>) {
-        val targetSet = newRelayUrls.toSet()
-        val toClose = relays.filter { it.url !in targetSet }
-        toClose.forEach {
-            it.unsubscribe(subscriptionId)
-            it.close()
-            relays.remove(it)
-            onLog("[bunker] switch_relays: dropped ${it.url}")
-        }
-        newRelayUrls.forEach { url ->
-            if (relays.none { it.url == url }) {
-                val r = RelayConnection(url)
-                relays += r
-                wireUpRelay(r)
-                onLog("[bunker] switch_relays: added $url")
-            }
         }
     }
 

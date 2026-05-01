@@ -49,7 +49,6 @@ fun ClientScreen() {
     var ncPerms by remember { mutableStateOf("") }
     var ncUrl by remember { mutableStateOf("") }
 
-    var switchRelaysCsv by remember { mutableStateOf("") }
     var customMethod by remember { mutableStateOf("") }
     var customParams by remember { mutableStateOf("") }
 
@@ -168,7 +167,7 @@ fun ClientScreen() {
                         }
                         client?.close()
                         val c = Nip46Client(
-                            relayUrls = relays,
+                            initialRelayUrls = relays,
                             initialRemotePubKey = null,
                             initialSecret = ncSecret.takeIf { it.isNotBlank() },
                             privateKeyHex = clientPriv.takeIf { it.isNotBlank() },
@@ -276,20 +275,14 @@ fun ClientScreen() {
 
         HorizontalDivider()
         Text("switch_relays", style = MaterialTheme.typography.titleSmall)
-        OutlinedTextField(
-            value = switchRelaysCsv,
-            onValueChange = { switchRelaysCsv = it },
-            label = { Text("New relays (comma-separated wss://…)") },
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            "Asks the bunker for its current relay list (params: []). If the bunker " +
+                "returns an array, this client switches its subscriptions to those relays.",
+            style = MaterialTheme.typography.bodySmall,
         )
         OutlinedButton(
             onClick = {
-                val urls = switchRelaysCsv.split(",").map { it.trim() }.filter { it.isNotBlank() }
-                if (urls.isEmpty()) {
-                    appendLog("[client] switch_relays needs at least one URL")
-                    return@OutlinedButton
-                }
-                scope.launch { client?.switchRelays(urls)?.also { appendLog("[client] switch_relays: $it") } }
+                scope.launch { client?.switchRelays()?.also { appendLog("[client] switch_relays: $it") } }
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("switch_relays") }
