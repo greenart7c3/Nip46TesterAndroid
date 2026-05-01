@@ -24,6 +24,7 @@ class Nip46RelayTester(val relayUrl: String, val onLog: (String) -> Unit = {}) {
         val notes: List<String>,
     )
 
+    @kotlin.OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     suspend fun run(timeoutMs: Long = 15_000): Result {
         val notes = mutableListOf<String>()
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())

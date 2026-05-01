@@ -1,6 +1,5 @@
 package com.greenart7c3.nip46tester.nip46
 
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,8 +13,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -52,9 +49,6 @@ class RelayConnection(
     private val _messages = MutableSharedFlow<RelayMessage>(extraBufferCapacity = 64)
     val messages: Flow<RelayMessage> = _messages.asSharedFlow()
 
-    val rawIncoming: Channel<String> = Channel(capacity = Channel.UNLIMITED)
-    val rawOutgoing: Channel<String> = Channel(capacity = Channel.UNLIMITED)
-
     fun connect() {
         if (ws != null) return
         _status.value = RelayStatus.Connecting
@@ -65,7 +59,6 @@ class RelayConnection(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                rawIncoming.trySend(text)
                 _messages.tryEmit(RelayMessage.RawText(text))
                 parse(text)?.let { _messages.tryEmit(it) }
             }
@@ -80,10 +73,7 @@ class RelayConnection(
         })
     }
 
-    fun send(text: String): Boolean {
-        rawOutgoing.trySend(text)
-        return ws?.send(text) == true
-    }
+    fun send(text: String): Boolean = ws?.send(text) == true
 
     fun close() {
         ws?.close(1000, "client closing")
@@ -117,32 +107,19 @@ class RelayConnection(
     }
 
     fun publish(event: NostrEvent) {
-        val arr = NostrJson.encodeToString(
-            JsonArray.serializer(),
-            JsonArray(
-                listOf(
-                    JsonPrimitive("EVENT"),
-                    NostrJson.encodeToJsonElement(NostrEvent.serializer(), event),
-                ),
-            ),
-        )
-        send(arr)
+        val eventJson = NostrJson.encodeToJsonElement(NostrEvent.serializer(), event)
+        val arr = JsonArray(listOf(JsonPrimitive("EVENT"), eventJson))
+        send(arr.toString())
     }
 
     fun subscribe(subscriptionId: String, filter: JsonElement) {
-        val arr = JsonArray(
-            listOf(
-                JsonPrimitive("REQ"),
-                JsonPrimitive(subscriptionId),
-                filter,
-            ),
-        )
-        send(NostrJson.encodeToString(JsonArray.serializer(), arr))
+        val arr = JsonArray(listOf(JsonPrimitive("REQ"), JsonPrimitive(subscriptionId), filter))
+        send(arr.toString())
     }
 
     fun unsubscribe(subscriptionId: String) {
         val arr = JsonArray(listOf(JsonPrimitive("CLOSE"), JsonPrimitive(subscriptionId)))
-        send(NostrJson.encodeToString(JsonArray.serializer(), arr))
+        send(arr.toString())
     }
 
     companion object {

@@ -63,7 +63,7 @@ class Nip46Client(
         }
     }
 
-    private fun handleIncoming(event: NostrEvent) {
+    private suspend fun handleIncoming(event: NostrEvent) {
         if (event.pubkey != bunker.remotePubKey) return
         try {
             val plaintext = crypto.nip44Decrypt(event.content, event.pubkey)

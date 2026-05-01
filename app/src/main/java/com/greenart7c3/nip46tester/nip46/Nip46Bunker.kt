@@ -81,7 +81,7 @@ class Nip46Bunker(
         }
     }
 
-    private fun handle(req: Nip46Request, clientPubKey: String): Nip46Response {
+    private suspend fun handle(req: Nip46Request, clientPubKey: String): Nip46Response {
         return when (req.method) {
             "connect" -> {
                 val providedSecret = req.params.getOrNull(1)
