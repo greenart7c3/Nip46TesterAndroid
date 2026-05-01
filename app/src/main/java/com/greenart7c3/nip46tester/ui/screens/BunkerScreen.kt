@@ -19,19 +19,24 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.greenart7c3.nip46tester.nip46.Nip46Bunker
+import com.greenart7c3.nip46tester.nip46.NostrConnectUrl
+import kotlinx.coroutines.launch
 
 @Composable
 fun BunkerScreen() {
+    val scope = rememberCoroutineScope()
     var relaysCsv by remember { mutableStateOf("wss://relay.nsec.app") }
     var bunkerPriv by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("test-secret") }
     var bunker by remember { mutableStateOf<Nip46Bunker?>(null) }
     var bunkerUrl by remember { mutableStateOf("") }
+    var nostrConnectInput by remember { mutableStateOf("") }
     val log = remember { mutableStateListOf<String>() }
 
     fun appendLog(line: String) {
@@ -46,7 +51,8 @@ fun BunkerScreen() {
         Text("Bunker (remote signer) tester", style = MaterialTheme.typography.titleMedium)
         Text(
             "Starts a minimal NIP-46 remote signer. It listens for kind 24133 events on the configured " +
-                "relays, decrypts them, and replies. Use the printed bunker:// URL in any NIP-46 client.",
+                "relays, decrypts them, and replies. Use the printed bunker:// URL in any NIP-46 client, " +
+                "or paste a nostrconnect:// URL below to initiate the client-initiated handshake.",
             style = MaterialTheme.typography.bodySmall,
         )
         OutlinedTextField(
@@ -100,6 +106,38 @@ fun BunkerScreen() {
                 )
             }
         }
+
+        HorizontalDivider()
+        Text("Connect to nostrconnect:// URL", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "Paste a client-initiated URL. The bunker will join its relays (if missing), publish a " +
+                "connect ack to the client, and then respond to subsequent requests as usual.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedTextField(
+            value = nostrConnectInput,
+            onValueChange = { nostrConnectInput = it },
+            label = { Text("nostrconnect:// URL") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = {
+                val b = bunker
+                if (b == null) {
+                    appendLog("[bunker] start the bunker first")
+                    return@Button
+                }
+                val url = runCatching { NostrConnectUrl.parse(nostrConnectInput) }
+                    .onFailure { appendLog("[bunker] parse error: ${it.message}") }
+                    .getOrNull() ?: return@Button
+                appendLog("[bunker] client pubkey ${url.clientPubKey}")
+                appendLog("[bunker] client relays ${url.relays.joinToString()}")
+                if (url.name != null) appendLog("[bunker] client app name: ${url.name}")
+                if (url.perms != null) appendLog("[bunker] client perms: ${url.perms}")
+                scope.launch { b.connectToClient(url) }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Send connect ack to client") }
 
         OutlinedButton(
             onClick = { bunker?.close().also { appendLog("[bunker] closed") } },

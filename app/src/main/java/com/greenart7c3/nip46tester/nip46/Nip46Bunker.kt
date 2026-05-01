@@ -13,12 +13,10 @@ import kotlinx.serialization.json.buildJsonObject
  * Minimal NIP-46 remote signer used for testing. Holds a private key, listens for
  * encrypted requests on the configured relays, and answers them.
  *
- * The bunker only auto-approves requests whose secret matches the one in the URL.
- * For UI testing the methods themselves return canned-but-correct shapes:
- *   - get_public_key: bunker pubkey hex
- *   - ping: "pong"
- *   - sign_event: signs the unsigned event JSON with the bunker key
- *   - nip04/nip44 encrypt/decrypt: forwarded to Quartz
+ * Two ways to bring a client on board:
+ *  - Bunker-initiated: hand the printed bunker:// URL to the client.
+ *  - Client-initiated (nostrconnect://): paste the client's URL into [connectToClient];
+ *    the bunker then connects to the URL's relays and publishes a "connect" ack.
  */
 class Nip46Bunker(
     relayUrls: List<String>,
@@ -28,43 +26,80 @@ class Nip46Bunker(
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val crypto = CryptoAdapter(privateKeyHex)
-    private val relays = relayUrls.map { RelayConnection(it) }
+    private val relays: MutableList<RelayConnection> = relayUrls.map { RelayConnection(it) }.toMutableList()
     private val subscriptionId = "nip46-bunker-${System.currentTimeMillis()}"
     private val approvedClients = mutableSetOf<String>()
+    private var started = false
 
     val pubKey: String get() = crypto.pubKeyHex
     val privKey: String get() = crypto.privKeyHex
+    val relayUrlsSnapshot: List<String> get() = relays.map { it.url }
 
     fun bunkerUrl(): String = BunkerUrl.build(crypto.pubKeyHex, relays.map { it.url }, secret)
 
     fun start() {
-        relays.forEach { relay ->
-            relay.connect()
-            scope.launch {
-                relay.status.collect { onLog("[relay ${relay.url}] $it") }
-            }
-            scope.launch {
-                relay.messages.collect { msg ->
-                    when (msg) {
-                        is RelayMessage.Event -> handleIncoming(relay, msg.event)
-                        is RelayMessage.Ok -> onLog("[relay ${relay.url}] OK ${msg.eventId.take(8)} accepted=${msg.accepted} ${msg.message}")
-                        is RelayMessage.Notice -> onLog("[relay ${relay.url}] NOTICE ${msg.text}")
-                        is RelayMessage.Closed -> onLog("[relay ${relay.url}] CLOSED ${msg.message}")
-                        else -> {}
-                    }
-                }
-            }
-            val filter: JsonObject = buildJsonObject {
-                put("kinds", JsonArray(listOf(JsonPrimitive(NIP46_KIND))))
-                put("#p", JsonArray(listOf(JsonPrimitive(crypto.pubKeyHex))))
-                put("since", JsonPrimitive(CryptoAdapter.nowSeconds() - 5))
-            }
-            relay.subscribe(subscriptionId, filter)
-            onLog("[bunker] listening on ${relay.url} as $subscriptionId")
-        }
+        started = true
+        relays.toList().forEach { wireUpRelay(it) }
     }
 
-    private fun handleIncoming(relay: RelayConnection, event: NostrEvent) {
+    private fun wireUpRelay(relay: RelayConnection) {
+        relay.connect()
+        scope.launch {
+            relay.status.collect { onLog("[relay ${relay.url}] $it") }
+        }
+        scope.launch {
+            relay.messages.collect { msg ->
+                when (msg) {
+                    is RelayMessage.Event -> handleIncoming(msg.event)
+                    is RelayMessage.Ok -> onLog("[relay ${relay.url}] OK ${msg.eventId.take(8)} accepted=${msg.accepted} ${msg.message}")
+                    is RelayMessage.Notice -> onLog("[relay ${relay.url}] NOTICE ${msg.text}")
+                    is RelayMessage.Closed -> onLog("[relay ${relay.url}] CLOSED ${msg.message}")
+                    else -> {}
+                }
+            }
+        }
+        val filter: JsonObject = buildJsonObject {
+            put("kinds", JsonArray(listOf(JsonPrimitive(NIP46_KIND))))
+            put("#p", JsonArray(listOf(JsonPrimitive(crypto.pubKeyHex))))
+            put("since", JsonPrimitive(CryptoAdapter.nowSeconds() - 5))
+        }
+        relay.subscribe(subscriptionId, filter)
+        onLog("[bunker] listening on ${relay.url} as $subscriptionId")
+    }
+
+    /**
+     * Adds the URL's relays to this bunker's relay set (if missing) and publishes an
+     * encrypted "connect" ack to the client. The id of the response carries the secret
+     * back to the client per the NIP-46 nostrconnect handshake.
+     */
+    suspend fun connectToClient(url: NostrConnectUrl) {
+        if (!started) {
+            onLog("[bunker] cannot connect: bunker not started")
+            return
+        }
+        url.relays.forEach { relayUrl ->
+            if (relays.none { it.url == relayUrl }) {
+                val r = RelayConnection(relayUrl)
+                relays += r
+                wireUpRelay(r)
+                onLog("[bunker] added relay $relayUrl from nostrconnect URL")
+            }
+        }
+        approvedClients.add(url.clientPubKey)
+
+        val response = Nip46Response(
+            id = url.secret.ifBlank { CryptoAdapter.newRequestId() },
+            result = "ack",
+        )
+        val ciphertext = crypto.nip44Encrypt(CryptoAdapter.encodeResponse(response), url.clientPubKey)
+        val signed = crypto.signNip46Event(ciphertext, url.clientPubKey)
+        // Publish on every relay listed in the URL so the client's subscription receives it.
+        val targets = relays.filter { it.url in url.relays }
+        targets.forEach { it.publish(signed) }
+        onLog("[bunker] -> connect ack to ${url.clientPubKey.take(16)}… on ${targets.size} relay(s)")
+    }
+
+    private fun handleIncoming(event: NostrEvent) {
         scope.launch {
             try {
                 val plaintext = crypto.nip44Decrypt(event.content, event.pubkey)
@@ -124,4 +159,3 @@ class Nip46Bunker(
         }
     }
 }
-

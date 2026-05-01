@@ -12,26 +12,58 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
 /**
- * NIP-46 client. Connects to a bunker, sends signed encrypted requests, awaits responses.
+ * NIP-46 client. Supports both flows defined by the spec:
  *
- * Logs every wire-level event so the UI can show what happens during the test run.
+ *  - bunker:// (bunker-initiated): the user knows the bunker's pubkey and relays up front
+ *    and sends a connect request first.
+ *  - nostrconnect:// (client-initiated): the client publishes its own URL out-of-band, then
+ *    listens; the bunker is the one that initiates contact. The bunker's pubkey is
+ *    discovered from the first decryptable inbound message.
  */
 class Nip46Client(
-    val bunker: BunkerUrl,
+    val relayUrls: List<String>,
+    initialRemotePubKey: String? = null,
+    val initialSecret: String? = null,
     privateKeyHex: String? = null,
     val onLog: (String) -> Unit = {},
 ) {
+    constructor(
+        bunker: BunkerUrl,
+        privateKeyHex: String? = null,
+        onLog: (String) -> Unit = {},
+    ) : this(
+        relayUrls = bunker.relays,
+        initialRemotePubKey = bunker.remotePubKey,
+        initialSecret = bunker.secret,
+        privateKeyHex = privateKeyHex,
+        onLog = onLog,
+    )
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val crypto = CryptoAdapter(privateKeyHex)
-    private val relays = bunker.relays.map { RelayConnection(it) }
+    private val relays = relayUrls.map { RelayConnection(it) }
     private val pending = mutableMapOf<String, CompletableDeferred<Nip46Response>>()
     private val subscriptionId = "nip46-client-${System.currentTimeMillis()}"
 
+    @Volatile private var remotePubKey: String? = initialRemotePubKey
+
     val clientPubKey: String get() = crypto.pubKeyHex
+    val bunkerPubKey: String? get() = remotePubKey
+    val isClientInitiated: Boolean = initialRemotePubKey == null
+
+    /** Builds a nostrconnect:// URL pointing at this client. Use only in client-initiated mode. */
+    fun nostrConnectUrl(secret: String, name: String? = null, perms: String? = null): String =
+        NostrConnectUrl.build(
+            clientPubKey = crypto.pubKeyHex,
+            relays = relayUrls,
+            secret = secret,
+            name = name,
+            perms = perms,
+        )
 
     fun start() {
         if (relays.isEmpty()) {
-            onLog("[client] No relays in bunker URL")
+            onLog("[client] No relays configured")
             return
         }
         relays.forEach { relay ->
@@ -46,15 +78,15 @@ class Nip46Client(
                         is RelayMessage.Ok -> onLog("[relay ${relay.shortName()}] OK ${msg.eventId.take(8)} accepted=${msg.accepted} ${msg.message}")
                         is RelayMessage.Notice -> onLog("[relay ${relay.shortName()}] NOTICE ${msg.text}")
                         is RelayMessage.Closed -> onLog("[relay ${relay.shortName()}] CLOSED ${msg.message}")
-                        is RelayMessage.RawText -> { /* logged via parsed variants */ }
                         else -> {}
                     }
                 }
             }
-            // Subscribe to messages addressed to us from the bunker.
             val filter: JsonObject = buildJsonObject {
                 put("kinds", JsonArray(listOf(JsonPrimitive(NIP46_KIND))))
-                put("authors", JsonArray(listOf(JsonPrimitive(bunker.remotePubKey))))
+                // In nostrconnect mode the bunker's pubkey is unknown until first contact;
+                // skip the authors filter and discover it from incoming events.
+                remotePubKey?.let { put("authors", JsonArray(listOf(JsonPrimitive(it)))) }
                 put("#p", JsonArray(listOf(JsonPrimitive(crypto.pubKeyHex))))
                 put("limit", JsonPrimitive(0))
             }
@@ -64,25 +96,40 @@ class Nip46Client(
     }
 
     private suspend fun handleIncoming(event: NostrEvent) {
-        if (event.pubkey != bunker.remotePubKey) return
-        try {
-            val plaintext = crypto.nip44Decrypt(event.content, event.pubkey)
-            val resp = NostrJson.decodeFromString(Nip46Response.serializer(), plaintext)
-            onLog("[client] <- ${resp.id.take(8)} result=${resp.result?.take(60)} error=${resp.error}")
-            pending.remove(resp.id)?.complete(resp)
+        if (remotePubKey != null && event.pubkey != remotePubKey) return
+        val plaintext = try {
+            crypto.nip44Decrypt(event.content, event.pubkey)
         } catch (t: Throwable) {
-            onLog("[client] decrypt failed: ${t.message}")
+            onLog("[client] decrypt failed from ${event.pubkey.take(8)}…: ${t.message}")
+            return
         }
+        val resp = try {
+            NostrJson.decodeFromString(Nip46Response.serializer(), plaintext)
+        } catch (t: Throwable) {
+            onLog("[client] non-response payload from ${event.pubkey.take(8)}…: ${t.message}")
+            return
+        }
+        if (remotePubKey == null) {
+            remotePubKey = event.pubkey
+            onLog("[client] discovered bunker pubkey: ${event.pubkey}")
+        }
+        onLog("[client] <- ${resp.id.take(8)} result=${resp.result?.take(60)} error=${resp.error}")
+        pending.remove(resp.id)?.complete(resp)
     }
 
     suspend fun request(method: String, params: List<String>, timeoutMs: Long = 15_000): Nip46Response? {
+        val target = remotePubKey
+        if (target == null) {
+            onLog("[client] no bunker connected yet — waiting for bunker to publish to nostrconnect URL")
+            return null
+        }
         val req = Nip46Request(id = CryptoAdapter.newRequestId(), method = method, params = params)
         val deferred = CompletableDeferred<Nip46Response>()
         pending[req.id] = deferred
 
         val plaintext = CryptoAdapter.encodeRequest(req)
-        val ciphertext = crypto.nip44Encrypt(plaintext, bunker.remotePubKey)
-        val event = crypto.signNip46Event(ciphertext, bunker.remotePubKey)
+        val ciphertext = crypto.nip44Encrypt(plaintext, target)
+        val event = crypto.signNip46Event(ciphertext, target)
         relays.forEach { it.publish(event) }
         onLog("[client] -> ${req.method} id=${req.id.take(8)}")
 
@@ -90,8 +137,12 @@ class Nip46Client(
     }
 
     suspend fun connect(): Nip46Response? {
-        val params = mutableListOf(bunker.remotePubKey)
-        bunker.secret?.let { params.add(it) }
+        val target = remotePubKey ?: run {
+            onLog("[client] cannot send connect: bunker pubkey unknown (use nostrconnect or wait for ack)")
+            return null
+        }
+        val params = mutableListOf(target)
+        initialSecret?.let { params.add(it) }
         return request("connect", params)
     }
 
