@@ -111,8 +111,8 @@ app/src/main/java/com/greenart7c3/nip46tester/
   it if you want a signing bunker.
 - The default relay is `wss://nos.lol`. Anything you publish on a public
   relay is, well, public — even ephemeral kinds may be observed.
-- Cleartext WebSockets (`ws://`) are disabled by the manifest. Use
-  `wss://`.
+- Cleartext `ws://` is permitted by the manifest so you can point the
+  tester at a local relay (`ws://10.0.2.2:7000` from the emulator, etc.).
 
 ## License
 
